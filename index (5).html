@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deteksi Jari 3 dan 5</title>
+  <style>
+    :root {
+      --bg: #f4f6fb; --card: #ffffff; --text: #1d2433; --muted: #6b7488;
+      --accent: #4f6bed; --accent-2: #20b486; --border: #e2e6f0; --track: #e8ebf4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #12151d; --card: #1b2030; --text: #eef1f8; --muted: #9aa3b8;
+        --accent: #7b92ff; --accent-2: #3dd6a3; --border: #2b3248; --track: #262c42;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      display: flex; justify-content: center; padding: 24px 16px;
+    }
+    main { width: 100%; max-width: 560px; }
+    h1 { font-size: 1.6rem; margin: 0 0 4px; text-align: center; }
+    .sub { text-align: center; color: var(--muted); margin: 0 0 20px; font-size: .95rem; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 16px; padding: 16px;
+    }
+    #webcam-container {
+      width: 100%; aspect-ratio: 1 / 1; background: #0c0f16;
+      border-radius: 12px; overflow: hidden; display: flex;
+      align-items: center; justify-content: center; position: relative;
+    }
+    #webcam-container canvas { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #placeholder { color: #9aa3b8; text-align: center; padding: 0 24px; position: absolute; }
+    .controls { display: flex; gap: 10px; margin: 14px 0; }
+    button {
+      flex: 1; padding: 12px 16px; border: 0; border-radius: 10px; font-size: 1rem;
+      font-weight: 600; cursor: pointer; background: var(--accent); color: #fff;
+    }
+    button.secondary { background: var(--track); color: var(--text); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    #status { text-align: center; font-size: .9rem; color: var(--muted); min-height: 1.3em; margin: 0 0 12px; }
+    #status.error { color: #e5484d; }
+    #result {
+      text-align: center; font-size: 1.5rem; font-weight: 700; margin: 6px 0 14px;
+      min-height: 1.6em;
+    }
+    .bar-row { margin-bottom: 10px; }
+    .bar-label { display: flex; justify-content: space-between; font-size: .9rem; margin-bottom: 4px; }
+    .bar-track { height: 12px; background: var(--track); border-radius: 99px; overflow: hidden; }
+    .bar-fill { height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .15s; }
+    .bar-row:nth-child(2) .bar-fill { background: var(--accent-2); }
+    footer { text-align: center; color: var(--muted); font-size: .8rem; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>✋ Deteksi Jari 3 dan 5</h1>
+    <p class="sub">Tunjukkan tangan Anda ke kamera</p>
+
+    <div class="card">
+      <div id="webcam-container">
+        <div id="placeholder">Klik <b>Mulai Kamera</b> lalu izinkan akses kamera pada browser.</div>
+      </div>
+
+      <div class="controls">
+        <button id="btn-start" type="button">Mulai Kamera</button>
+        <button id="btn-stop" type="button" class="secondary" disabled>Berhenti</button>
+      </div>
+
+      <p id="status"></p>
+      <div id="result"></div>
+      <div id="label-container"></div>
+    </div>
+
+    <footer>Model: Teachable Machine (Image Project)</footer>
+  </main>
+
+  <!-- Library TensorFlow.js & Teachable Machine -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+
+  <script>
+    // File model berada di folder yang sama dengan index.html
+    const MODEL_URL = "model.json";
+    const METADATA_URL = "metadata.json";
+
+    let model, webcam, maxPredictions, rafId = null, running = false;
+
+    const btnStart = document.getElementById("btn-start");
+    const btnStop = document.getElementById("btn-stop");
+    const statusEl = document.getElementById("status");
+    const resultEl = document.getElementById("result");
+    const camBox = document.getElementById("webcam-container");
+    const labelBox = document.getElementById("label-container");
+    const placeholder = document.getElementById("placeholder");
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? "error" : "";
+    }
+
+    async function init() {
+      // Kamera hanya bisa diakses lewat HTTPS atau localhost
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setStatus("Browser tidak mendukung kamera, atau halaman tidak dibuka lewat HTTPS/localhost.", true);
+        return;
+      }
+      if (location.protocol === "file:") {
+        setStatus("Halaman dibuka dari file langsung. Jalankan lewat server lokal (localhost) atau GitHub Pages.", true);
+        return;
+      }
+
+      btnStart.disabled = true;
+      try {
+        if (!model) {
+          setStatus("Memuat model...");
+          model = await tmImage.load(MODEL_URL, METADATA_URL);
+          maxPredictions = model.getTotalClasses();
+          labelBox.innerHTML = "";
+          for (let i = 0; i < maxPredictions; i++) {
+            const row = document.createElement("div");
+            row.className = "bar-row";
+            row.innerHTML =
+              '<div class="bar-label"><span class="name"></span><span class="pct">0%</span></div>' +
+              '<div class="bar-track"><div class="bar-fill"></div></div>';
+            labelBox.appendChild(row);
+          }
+        }
+
+        setStatus("Meminta izin kamera...");
+        webcam = new tmImage.Webcam(400, 400, true); // lebar, tinggi, mirror
+        await webcam.setup({ facingMode: "user" });
+        await webcam.play();
+
+        placeholder.style.display = "none";
+        camBox.appendChild(webcam.canvas);
+        running = true;
+        btnStop.disabled = false;
+        setStatus("Kamera aktif");
+        rafId = window.requestAnimationFrame(loop);
+      } catch (err) {
+        console.error(err);
+        btnStart.disabled = false;
+        let msg = "Gagal memulai: " + (err.message || err);
+        if (err.name === "NotAllowedError") msg = "Izin kamera ditolak. Aktifkan izin kamera di pengaturan browser lalu coba lagi.";
+        else if (err.name === "NotFoundError") msg = "Kamera tidak ditemukan pada perangkat ini.";
+        else if (err.name === "NotReadableError") msg = "Kamera sedang dipakai aplikasi lain.";
+        setStatus(msg, true);
+      }
+    }
+
+    async function loop() {
+      if (!running) return;
+      webcam.update();
+      await predict();
+      rafId = window.requestAnimationFrame(loop);
+    }
+
+    async function predict() {
+      const prediction = await model.predict(webcam.canvas);
+      let best = prediction[0];
+      for (let i = 0; i < maxPredictions; i++) {
+        const p = prediction[i];
+        const pct = Math.round(p.probability * 100);
+        const row = labelBox.children[i];
+        row.querySelector(".name").textContent = p.className;
+        row.querySelector(".pct").textContent = pct + "%";
+        row.querySelector(".bar-fill").style.width = pct + "%";
+        if (p.probability > best.probability) best = p;
+      }
+      resultEl.textContent = best.probability > 0.6
+        ? "Terdeteksi: " + best.className
+        : "Tidak yakin...";
+    }
+
+    function stop() {
+      running = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      if (webcam) {
+        webcam.stop();
+        if (webcam.canvas && webcam.canvas.parentNode) webcam.canvas.parentNode.removeChild(webcam.canvas);
+      }
+      placeholder.style.display = "";
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      resultEl.textContent = "";
+      setStatus("Kamera dihentikan");
+    }
+
+    btnStart.addEventListener("click", init);
+    btnStop.addEventListener("click", stop);
+  </script>
+</body>
+</html>
